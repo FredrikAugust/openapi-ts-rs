@@ -66,7 +66,20 @@ fn run() -> Result<()> {
     Ok(())
 }
 
+/// mimalloc commits memory in large regions that transparent huge pages back with 2 MiB pages,
+/// tripling peak RSS for no measurable speedup.
+#[cfg(target_os = "linux")]
+fn disable_transparent_huge_pages() {
+    const PR_SET_THP_DISABLE: i32 = 41;
+    unsafe extern "C" {
+        fn prctl(option: i32, ...) -> i32;
+    }
+    unsafe { prctl(PR_SET_THP_DISABLE, 1 as std::ffi::c_ulong, 0 as std::ffi::c_ulong, 0 as std::ffi::c_ulong, 0 as std::ffi::c_ulong) };
+}
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    disable_transparent_huge_pages();
     if let Err(e) = run() {
         eprintln!("error: {e:#}");
         std::process::exit(1);
