@@ -103,11 +103,120 @@ fn restore_c1(s: &str) -> String {
 
 pub fn parse(src: &str) -> Result<Value> {
     if !src.contains(is_c1) {
+        if src.len() >= SPLIT_MIN
+            && let Some(v) = parse_split(src)
+        {
+            return Ok(v);
+        }
         return parse_events(src, false);
     }
     let shifted: String =
         src.chars().map(|c| if is_c1(c) { char::from_u32(c as u32 + C1_SHIFT).unwrap() } else { c }).collect();
     parse_events(&shifted, true)
+}
+
+/// Files at least this large are parsed in parallel chunks when their layout allows it.
+const SPLIT_MIN: usize = 256 * 1024;
+const CHUNK: usize = 32 * 1024;
+
+/// Parses a large file whose root is a block mapping by splitting the bodies of its large
+/// top-level keys (`paths:`) at their two-space-indented keys and parsing the pieces in
+/// parallel. In a block mapping indented by two, a non-blank, non-comment line indented by
+/// exactly two can only start a new key, so each piece is a valid mapping. Returns `None`, and
+/// the caller parses the whole file, when the layout does not fit or any piece fails, such as
+/// on an alias to an anchor in another piece or a key duplicated across pieces, so errors and
+/// anchors behave exactly as in a whole-file parse.
+fn parse_split(src: &str) -> Option<Value> {
+    use rayon::prelude::*;
+    let mut lines = vec![];
+    let mut at = 0;
+    for l in src.split_inclusive('\n') {
+        lines.push((at, l));
+        at += l.len();
+    }
+    let content = |l: &str| {
+        let t = l.trim_start_matches(' ');
+        !t.trim_end().is_empty() && !t.starts_with('#')
+    };
+    let indent = |l: &str| l.len() - l.trim_start_matches(' ').len();
+    let mut top = vec![];
+    for (i, (_, l)) in lines.iter().enumerate() {
+        if content(l) && indent(l) == 0 {
+            if l.starts_with(['-', '?', ':', '%', '{', '[', '&', '*', '!', '\t']) || l.starts_with("---") {
+                return None;
+            }
+            top.push(i);
+        }
+    }
+    if lines[..*top.first()?].iter().any(|(_, l)| content(l)) {
+        return None;
+    }
+    let mut skeleton = String::new();
+    let mut split = vec![];
+    for (n, &i) in top.iter().enumerate() {
+        let end = top.get(n + 1).copied().unwrap_or(lines.len());
+        let (start, end_byte) = (lines[i].0 + lines[i].1.len(), lines.get(end).map_or(src.len(), |l| l.0));
+        let head = lines[i].1.trim_end();
+        let key = head.strip_suffix(':').filter(|k| !k.contains([':', '#', '"', '\'', ' ']));
+        let body = &lines[i + 1..end];
+        let block_map = body.iter().find(|(_, l)| content(l)).is_some_and(|(_, l)| indent(l) == 2);
+        match key {
+            Some(key) if end_byte - start >= CHUNK && block_map => {
+                skeleton.push_str(lines[i].1);
+                skeleton.push_str("  {}\n");
+                let mut pieces = vec![];
+                let mut piece_start = start;
+                for &(off, l) in body {
+                    if content(l) && indent(l) < 2 || l.starts_with('\t') {
+                        return None;
+                    }
+                    if content(l) && indent(l) == 2 {
+                        if l[2..].starts_with(['-', '?', ':']) || l[2..].starts_with("<<") {
+                            return None;
+                        }
+                        // Only plain keys are cut points; a line starting a flow collection or
+                        // a quoted scalar may continue the previous entry.
+                        let plain = !l[2..].starts_with(['{', '[', '"', '\'', '|', '>', '!', '&', '*', '%', '@', '`']);
+                        if plain && off - piece_start >= CHUNK {
+                            pieces.push(&src[piece_start..off]);
+                            piece_start = off;
+                        }
+                    }
+                }
+                pieces.push(&src[piece_start..end_byte]);
+                split.push((key.to_string(), pieces));
+            }
+            _ => skeleton.push_str(&src[lines[i].0..end_byte]),
+        }
+    }
+    if split.is_empty() {
+        return None;
+    }
+    let mut root = match parse_events(&skeleton, false).ok()? {
+        Value::Object(o) => o,
+        _ => return None,
+    };
+    let pieces: Vec<(usize, &str)> =
+        split.iter().enumerate().flat_map(|(k, (_, p))| p.iter().map(move |p| (k, *p))).collect();
+    let parsed: Vec<Option<Map<String, Value>>> = pieces
+        .par_iter()
+        .map(|(_, p)| match parse_events(p, false) {
+            Ok(Value::Object(o)) => Some(o),
+            _ => None,
+        })
+        .collect();
+    let mut maps: Vec<Map<String, Value>> = split.iter().map(|_| Map::new()).collect();
+    for ((k, _), o) in pieces.iter().zip(parsed) {
+        for (key, v) in o? {
+            if maps[*k].insert(key, v).is_some() {
+                return None;
+            }
+        }
+    }
+    for ((key, _), m) in split.into_iter().zip(maps) {
+        *root.get_mut(&key)? = Value::Object(m);
+    }
+    Some(Value::Object(root))
 }
 
 fn parse_events(src: &str, c1: bool) -> Result<Value> {
