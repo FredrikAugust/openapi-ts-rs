@@ -43,7 +43,7 @@ fn run() -> Result<()> {
     if std::env::var_os("OPENAPI_TS_RS_TIMING").is_some() {
         eprintln!("load {t1:?}, emit {:?}", t.elapsed() - t1);
     }
-    let errors = g.errors.into_inner();
+    let errors = g.errors.take();
     if !errors.is_empty() {
         let msg = format!("{} unresolved $ref(s):\n  {}", errors.len(), errors.join("\n  "));
         if strict {
@@ -60,6 +60,9 @@ fn run() -> Result<()> {
         }
         None => print!("{ts}"),
     }
+    // Freeing every parsed document only delays the exit.
+    std::mem::forget(g);
+    std::mem::forget(spec);
     Ok(())
 }
 

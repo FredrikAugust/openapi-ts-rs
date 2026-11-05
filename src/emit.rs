@@ -832,10 +832,10 @@ pub fn ts_index(file: &str, pointer: &[String]) -> String {
     ts_index_raw(file, &segs)
 }
 
-fn ts_index_raw(file: &str, segs: &[String]) -> String {
-    let idx = |s: &[String]| s.iter().map(|s| format!("[{}]", str_lit(s))).collect::<String>();
+fn ts_index_raw<S: AsRef<str>>(file: &str, segs: &[S]) -> String {
+    let idx = |s: &[S]| s.iter().map(|s| format!("[{}]", str_lit(s.as_ref()))).collect::<String>();
     match (file, segs.split_first()) {
-        (".", Some((head, rest))) => format!("{head}{}", idx(rest)),
+        (".", Some((head, rest))) => format!("{}{}", head.as_ref(), idx(rest)),
         (".", None) => "unknown".into(),
         (f, _) => format!("external[{}]{}", str_lit(f), idx(segs)),
     }

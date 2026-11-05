@@ -107,12 +107,12 @@ pub fn split_ref(r: &str) -> (&str, Vec<String>) {
 
 /// A location segment; array indices matter to the hint rules.
 #[derive(Clone)]
-enum Seg {
-    K(String),
+enum Seg<'a> {
+    K(&'a str),
     I,
 }
 
-fn seg(p: &[Seg], i: usize) -> &str {
+fn seg<'a>(p: &[Seg<'a>], i: usize) -> &'a str {
     match p.get(i) {
         Some(Seg::K(k)) => k,
         _ => "",
@@ -133,7 +133,7 @@ fn get_hint(p: &[Seg], start: Kind) -> Kind {
     fn media(p: &[Seg]) -> Kind {
         if seg(p, 0) == "schema" { schema(&p[1..]) } else { Kind::MediaType }
     }
-    fn tail(p: &[Seg], n: usize) -> &[Seg] {
+    fn tail<'p, 'a>(p: &'p [Seg<'a>], n: usize) -> &'p [Seg<'a>] {
         p.get(n..).unwrap_or(&[])
     }
     fn body(p: &[Seg]) -> Kind {
@@ -236,8 +236,8 @@ impl Spec {
                 Some("paths" | "components") => Kind::Document,
                 _ => {
                     let mut p = at.clone();
-                    p.push(Seg::K(file.to_string()));
-                    p.extend(pointer.iter().map(|s| Seg::K(s.clone())));
+                    p.push(Seg::K(file));
+                    p.extend(pointer.iter().map(|s| Seg::K(s)));
                     get_hint(&p, kind)
                 }
             };
@@ -387,20 +387,20 @@ fn strip_x_refs(v: &mut Value) {
 /// the file's kind, and later refs to the same file find it already loaded.
 fn collect_refs<'a>(
     v: &'a Value,
-    path: &mut Vec<Seg>,
+    path: &mut Vec<Seg<'a>>,
     seen: &mut std::collections::HashSet<&'a str>,
-    out: &mut Vec<(Vec<Seg>, String)>,
+    out: &mut Vec<(Vec<Seg<'a>>, &'a str)>,
 ) {
     match v {
         Value::Object(o) => {
             if let Some(r) = o.get("$ref").and_then(Value::as_str) {
                 let file = r.split_once('#').map_or(r, |(f, _)| f);
                 if !file.is_empty() && seen.insert(file) {
-                    out.push((path.clone(), r.to_string()));
+                    out.push((path.clone(), r));
                 }
             }
             for (k, x) in o {
-                path.push(Seg::K(k.clone()));
+                path.push(Seg::K(k));
                 collect_refs(x, path, seen, out);
                 path.pop();
             }
@@ -417,19 +417,23 @@ fn collect_refs<'a>(
 }
 
 /// Visits every object in `v` with its path.
-pub fn walk<'a>(v: &'a Value, path: &mut Vec<String>, f: &mut dyn FnMut(&'a Obj, &[String])) {
+pub fn walk<'a>(
+    v: &'a Value,
+    path: &mut Vec<std::borrow::Cow<'a, str>>,
+    f: &mut dyn FnMut(&'a Obj, &[std::borrow::Cow<'a, str>]),
+) {
     match v {
         Value::Object(o) => {
             f(o, path);
             for (k, x) in o {
-                path.push(k.clone());
+                path.push(k.as_str().into());
                 walk(x, path, f);
                 path.pop();
             }
         }
         Value::Array(a) => {
             for (i, x) in a.iter().enumerate() {
-                path.push(i.to_string());
+                path.push(i.to_string().into());
                 walk(x, path, f);
                 path.pop();
             }
