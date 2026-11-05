@@ -77,7 +77,8 @@ fn disable_transparent_huge_pages() {
     unsafe extern "C" {
         fn prctl(option: i32, ...) -> i32;
     }
-    unsafe { prctl(PR_SET_THP_DISABLE, 1 as std::ffi::c_ulong, 0 as std::ffi::c_ulong, 0 as std::ffi::c_ulong, 0 as std::ffi::c_ulong) };
+    let (on, unused) = (1 as std::ffi::c_ulong, 0 as std::ffi::c_ulong);
+    unsafe { prctl(PR_SET_THP_DISABLE, on, unused, unused, unused) };
 }
 
 fn main() {

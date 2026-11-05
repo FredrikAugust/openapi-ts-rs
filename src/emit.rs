@@ -63,28 +63,37 @@ fn comp<'v>(o: &'v Obj, k: &str) -> Option<Vec<&'v Value>> {
 
 impl<'a> Gen<'a> {
     pub fn new(spec: &'a Spec) -> Self {
+        let files: Vec<(&String, &crate::load::File)> = spec.files.iter().collect();
+        let found: Vec<_> = files
+            .par_iter()
+            .map(|(id, f)| {
+                let mut found = vec![];
+                walk(&f.doc, &mut vec![], &mut |o, path| {
+                    if o.get("discriminator").is_some_and(|d| truthy(Some(d))) {
+                        found.push((ts_index_raw(id, path), o));
+                    }
+                });
+                found
+            })
+            .collect();
         let mut discs = HashMap::new();
         let mut injected = vec![];
-        for (id, f) in &spec.files {
-            walk(&f.doc, &mut vec![], &mut |o, path| {
-                let Some(d) = o.get("discriminator").filter(|d| truthy(Some(d))) else {
-                    return;
-                };
-                let property = d.get("propertyName").map(js_string).unwrap_or_else(|| "undefined".into());
-                let mapping = d.get("mapping").and_then(obj).cloned();
-                let refs: Vec<String> = o
-                    .get("oneOf")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|c| c.get("$ref")?.as_str().map(String::from))
-                    .collect();
-                if spec.files.len() > 1 && !refs.is_empty() {
-                    injected.push((refs, format!("{}\u{0}{}", property, serde_json::to_string(&mapping).unwrap())));
-                }
-                // 6.7.0 keys these by the raw path, so a discriminator under `properties` is never found.
-                discs.insert(ts_index_raw(id, path), Disc { property, mapping });
-            });
+        for (index, o) in found.into_iter().flatten() {
+            let d = &o["discriminator"];
+            let property = d.get("propertyName").map(js_string).unwrap_or_else(|| "undefined".into());
+            let mapping = d.get("mapping").and_then(obj).cloned();
+            let refs: Vec<String> = o
+                .get("oneOf")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c.get("$ref")?.as_str().map(String::from))
+                .collect();
+            if spec.files.len() > 1 && !refs.is_empty() {
+                injected.push((refs, format!("{}\u{0}{}", property, serde_json::to_string(&mapping).unwrap())));
+            }
+            // 6.7.0 keys these by the raw path, so a discriminator under `properties` is never found.
+            discs.insert(index, Disc { property, mapping });
         }
         Gen::with(spec, ".", Arc::new(Discriminators { by_index: discs, injected }))
     }
