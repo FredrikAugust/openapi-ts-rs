@@ -281,11 +281,35 @@ fn ref_target(from: &Path, r: &str) -> Option<PathBuf> {
     Some(normalize(&from.parent().unwrap().join(percent_decode(file))))
 }
 
-fn read_and_parse(path: &Path) -> Result<Value, String> {
-    let src = std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-    let mut doc = crate::yaml::parse(&src).map_err(|e| format!("parsing {}: {e:#}", path.display()))?;
+fn read(path: &Path) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))
+}
+
+fn parse(path: &Path, src: &str) -> Result<Value, String> {
+    let mut doc = crate::yaml::parse(src).map_err(|e| format!("parsing {}: {e:#}", path.display()))?;
     strip_x_refs(&mut doc);
     Ok(doc)
+}
+
+/// The file parts of what look like `$ref` values in YAML or JSON text. A guess, used only to
+/// start parsing referenced files before their parent is parsed; the parsed refs are authoritative.
+fn guess_ref_files(src: &str) -> indexmap::IndexSet<&str> {
+    let mut out = indexmap::IndexSet::new();
+    for (i, _) in src.match_indices("$ref") {
+        let rest = src[i + 4..].trim_start_matches(['"', '\'']).trim_start_matches([' ', '\t']);
+        let Some(rest) = rest.strip_prefix(':') else { continue };
+        let rest = rest.trim_start_matches([' ', '\t']);
+        let (rest, end): (&str, &[char]) = match rest.as_bytes().first() {
+            Some(b'"') => (&rest[1..], &['"', '#', '\n']),
+            Some(b'\'') => (&rest[1..], &['\'', '#', '\n']),
+            _ => (rest, &['#', '\n', '\r', ' ', '\t', ',', '}', ']']),
+        };
+        let file = &rest[..rest.find(end).unwrap_or(rest.len())];
+        if !file.is_empty() {
+            out.insert(file);
+        }
+    }
+    out
 }
 
 /// Distinct file parts of the external `$ref`s in `v`.
@@ -307,24 +331,27 @@ fn ref_files<'a>(v: &'a Value, out: &mut indexmap::IndexSet<&'a str>) {
 
 /// Reads and parses `root` and every file it references, transitively, in parallel.
 fn parse_all(root: &Path) -> Parsed {
+    fn spawn<'s>(scope: &rayon::Scope<'s>, from: &Path, files: indexmap::IndexSet<&str>, out: &'s Mutex<Parsed>) {
+        let targets: Vec<PathBuf> = files.into_iter().filter_map(|f| ref_target(from, f)).collect();
+        let mut seen = out.lock().unwrap();
+        for t in targets {
+            if !seen.contains_key(&t) {
+                seen.insert(t.clone(), Err(String::new()));
+                scope.spawn(move |s| visit(s, t, out));
+            }
+        }
+    }
     fn visit<'s>(scope: &rayon::Scope<'s>, path: PathBuf, out: &'s Mutex<Parsed>) {
-        let doc = read_and_parse(&path);
-        let mut targets = vec![];
+        let doc = read(&path).and_then(|src| {
+            spawn(scope, &path, guess_ref_files(&src), out);
+            parse(&path, &src)
+        });
         if let Ok(d) = &doc {
             let mut files = indexmap::IndexSet::new();
             ref_files(d, &mut files);
-            targets.extend(files.into_iter().filter_map(|f| ref_target(&path, f)));
+            spawn(scope, &path, files, out);
         }
-        let mut seen = out.lock().unwrap();
-        seen.insert(path.clone(), doc);
-        for t in targets {
-            {
-                if !seen.contains_key(&t) {
-                    seen.insert(t.clone(), Err(String::new()));
-                    scope.spawn(move |s| visit(s, t, out));
-                }
-            }
-        }
+        out.lock().unwrap().insert(path, doc);
     }
     let out = Mutex::new(HashMap::new());
     out.lock().unwrap().insert(root.to_path_buf(), Err(String::new()));
