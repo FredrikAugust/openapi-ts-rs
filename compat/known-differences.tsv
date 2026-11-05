@@ -1,0 +1,32 @@
+# Specs whose output differs from openapi-typescript 6.7.0 because of a 6.7.0 bug; openapi-ts-rs emits the correct type.
+# A: percent-encoded $ref pointers left encoded, so the lookup names a key that does not exist
+# B: YAML dates turned into Date objects, so enum "2011-01-01" becomes "2011-01-01T00:00:00.000Z"
+# C: string enum values under a non-string type emitted unquoted, naming types that do not exist
+# D: parameters $ref'd by array index (…/parameters/2) silently dropped
+# E: backslashes not escaped in string literals, so "N\A" becomes "NA"
+# F: non-pointer fragments (file.yaml#Name) ignored, so the ref points at the whole file
+APIs_bbci.co.uk_1.0_openapi.yaml	C
+APIs_brex.io_2021.12_openapi.yaml	A
+APIs_codat.io_accounting_2.1.0_openapi.yaml	D
+APIs_codat.io_sync-for-commerce_1.1_openapi.yaml	A D
+APIs_codat.io_sync-for-expenses_prealpha_openapi.yaml	D
+APIs_conjur.local_5.3.0_openapi.yaml	A D
+APIs_digitalocean.com_2.0_openapi.yaml	A D
+APIs_dracoon.team_4.42.3_openapi.yaml	C
+APIs_enode.io_1.3.10_openapi.yaml	A D
+APIs_googleapis.com_cloudidentity_v1beta1_openapi.yaml	C
+APIs_id4i.de_1.0.2_openapi.yaml	C
+APIs_mailchimp.com_3.0.55_openapi.yaml	C
+APIs_nexmo.com_application.v2_2.1.4_openapi.yaml	A
+APIs_opensuse.org_obs_2.10.50_openapi.yaml	A D
+APIs_ote-godaddy.com_subscriptions_1.0.0_openapi.yaml	C
+APIs_probely.com_1.2.0_openapi.yaml	C
+APIs_rev.ai_v1_openapi.yaml	A
+APIs_spacetraders.io_2.0.0_openapi.yaml	A
+APIs_stripe.com_2022-11-15_openapi.yaml	B
+APIs_surevoip.co.uk_9dcb0dc8_openapi.yaml	D
+APIs_telnyx.com_2.0.0_openapi.yaml	B
+APIs_vimeo.com_3.4_openapi.yaml	C
+APIs_zoom.us_2.0.0_openapi.yaml	C
+APIs_drchrono.com_v4__Hunt_Valley__openapi.yaml	E
+remote-ref-test.yaml	F

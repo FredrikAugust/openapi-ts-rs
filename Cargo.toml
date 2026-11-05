@@ -1,0 +1,16 @@
+[package]
+name = "openapi-ts-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+granit-parser = { version = "2.1.0", default-features = false, features = ["std", "error_messages"] }
+indexmap = "2.14.2"
+mimalloc = "0.1.52"
+rayon = "1.12.0"
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+
+[profile.release]
+lto = true
+codegen-units = 1

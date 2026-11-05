@@ -1,0 +1,83 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --release -- -D warnings
+      - run: cargo build --release
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Compare with openapi-typescript 6.7.0 on the public corpus
+        working-directory: compat
+        env:
+          SAMPLE: "8"
+        run: |
+          npm ci
+          ./fetch-corpus.sh corpus
+          node compare.mjs --list corpus/specs.txt ../target/release/openapi-ts-rs | tail -40
+
+  build:
+    needs: check
+    strategy:
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          - { target: aarch64-apple-darwin, os: macos-15 }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          mkdir dist
+          tar -czf dist/openapi-ts-rs-${{ matrix.target }}.tar.gz -C target/release openapi-ts-rs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Versions come from the run number, so every push to main is a release without tagging by hand.
+          TAG: v0.1.${{ github.run_number }}
+        run: |
+          (cd dist && sha256sum *.tar.gz > checksums.txt)
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$TAG" --notes "Built from ${GITHUB_SHA}."

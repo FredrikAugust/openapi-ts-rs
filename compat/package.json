@@ -1,0 +1,10 @@
+{
+  "name": "openapi-ts-rs-compat",
+  "private": true,
+  "type": "module",
+  "description": "Checks that openapi-ts-rs output is type-equal to openapi-typescript 6.7.0",
+  "devDependencies": {
+    "openapi-typescript": "6.7.0",
+    "typescript": "7.0.2"
+  }
+}
