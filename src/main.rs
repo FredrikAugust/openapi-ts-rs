@@ -56,7 +56,10 @@ fn run() -> Result<()> {
             if let Some(dir) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
                 std::fs::create_dir_all(dir)?;
             }
-            std::fs::write(p, ts)?;
+            // Rewriting an unchanged file costs more than comparing it, and keeps its mtime for watchers.
+            if std::fs::read(&p).ok().as_deref() != Some(ts.as_bytes()) {
+                std::fs::write(p, ts)?;
+            }
         }
         None => print!("{ts}"),
     }
