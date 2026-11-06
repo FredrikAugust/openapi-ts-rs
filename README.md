@@ -21,6 +21,28 @@ openapi-ts-rs spec.yml --strict           # ...or fails on them
 Every push to `main` publishes a release (`v0.1.<run number>`) with binaries for Linux and macOS on
 x86_64 and arm64. While the repository is private, mise needs a `GITHUB_TOKEN` that can read it.
 
+## Performance
+
+openapi-typescript 6.7.0 against openapi-ts-rs on 6.7.0's own example specs. Mean ± σ of wall time,
+then median peak memory:
+
+| Spec | openapi-typescript 6.7.0 | openapi-ts-rs | Speedup |
+|---|---|---|---|
+| `github-api.yaml` | 1,108 ± 79 ms, 246 MiB | 321 ± 16 ms, 92 MiB | 3× |
+| `stripe-api.yaml` | 663 ± 43 ms, 179 MiB | 90.2 ± 7.0 ms, 49 MiB | 7× |
+| `digital-ocean-api/DigitalOcean-public.v2.yaml` | 31,193 ± 569 ms, 168 MiB | 40.1 ± 5.3 ms, 21 MiB | 778× |
+| `octokit-ghes-3.6-diff-to-api.json` | 228 ± 7 ms, 91 MiB | 32.6 ± 2.8 ms, 15 MiB | 7× |
+
+The gap grows with the number of files a spec references. DigitalOcean's spec is split over 1,659
+YAML files, and 6.7.0 walks and serializes every loaded file again for each one it loads. On the
+single-file specs, most of openapi-ts-rs's time goes to parsing. Measured at `f352418` on an
+8-vCPU Intel Xeon @ 2.60 GHz (Linux) with Node 24.22.1 and hyperfine 2.0.0. To reproduce:
+
+```sh
+cargo build --release
+cd compat && npm ci && ./bench.sh   # needs hyperfine >= 2.0; prints the table above
+```
+
 ## Compatibility with 6.7.0
 
 Output is checked by type equality, not text: `compat/compare.mjs` runs both generators and asks
