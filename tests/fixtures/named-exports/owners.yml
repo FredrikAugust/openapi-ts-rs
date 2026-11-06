@@ -1,0 +1,4 @@
+components:
+  schemas:
+    Owner: { type: object, properties: { name: { type: string } } }
+    Shared: { type: integer }

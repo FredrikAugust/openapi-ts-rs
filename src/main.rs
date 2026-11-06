@@ -1,6 +1,6 @@
 //! openapi-ts-rs: generates TypeScript types from OpenAPI 3 specs in openapi-typescript 6.7.0's shape.
 //!
-//! Usage: openapi-ts-rs <spec.yml> [-o <out.d.ts>] [--strict]
+//! Usage: openapi-ts-rs <spec.yml> [-o <out.d.ts>] [--strict] [--named-exports]
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -13,15 +13,16 @@ mod yaml;
 use anyhow::{Result, bail};
 use std::path::PathBuf;
 
-const USAGE: &str = "usage: openapi-ts-rs <spec.yml> [-o <out.d.ts>] [--strict]\n\n  --strict  fail when a $ref does not resolve (default: warn)";
+const USAGE: &str = "usage: openapi-ts-rs <spec.yml> [-o <out.d.ts>] [--strict] [--named-exports]\n\n  --strict         fail when a $ref does not resolve (default: warn)\n  --named-exports  also export every components.schemas entry by name";
 
 fn run() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let (mut input, mut output, mut strict) = (None, None, false);
+    let (mut input, mut output, mut strict, mut named_exports) = (None, None, false, false);
     while let Some(a) = args.next() {
         match a.as_str() {
             "-o" | "--output" => output = args.next().map(PathBuf::from),
             "--strict" => strict = true,
+            "--named-exports" => named_exports = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(());
@@ -39,7 +40,10 @@ fn run() -> Result<()> {
     let spec = load::Spec::load(&input)?;
     let t1 = t.elapsed();
     let g = emit::Gen::new(&spec);
-    let ts = g.generate();
+    let mut ts = g.generate();
+    if named_exports {
+        ts.push_str(&g.named_exports());
+    }
     if std::env::var_os("OPENAPI_TS_RS_TIMING").is_some() {
         eprintln!("load {t1:?}, emit {:?}", t.elapsed() - t1);
     }

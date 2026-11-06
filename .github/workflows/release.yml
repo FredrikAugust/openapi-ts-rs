@@ -25,6 +25,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --release -- -D warnings
       - run: cargo build --release
+      - run: cargo test --release
       - uses: actions/setup-node@v4
         with:
           node-version: 24
