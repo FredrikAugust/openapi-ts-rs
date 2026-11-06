@@ -871,6 +871,63 @@ impl<'a> Gen<'a> {
         header.extend(out);
         header.join("\n")
     }
+
+    /// `export type Name = <lookup>;` for every schema under `components.schemas`, so consumers can
+    /// import schemas by name. A name defined in several files gets no export, since picking one
+    /// would hide which schema a consumer gets; the root file wins over external files.
+    pub fn named_exports(&self) -> String {
+        let schema_names = |id: &str| -> Vec<String> {
+            let f = &self.spec.files[id];
+            if f.kind != Kind::Document {
+                return vec![];
+            }
+            let schemas = f.doc.get("components").and_then(|c| c.get("schemas")).and_then(obj);
+            schemas
+                .into_iter()
+                .flatten()
+                .map(|(k, _)| k.clone())
+                .filter(|k| is_identifier(k) && !RESERVED.contains(&k.as_str()))
+                .collect()
+        };
+        let root = schema_names(".");
+        let mut defined_in: IndexMap<String, Vec<String>> = IndexMap::new();
+        let mut ids: Vec<&String> = self.spec.files.keys().filter(|k| *k != ".").collect();
+        ids.sort();
+        for id in ids {
+            for name in schema_names(id) {
+                if !root.contains(&name) {
+                    defined_in.entry(name).or_default().push(id.clone());
+                }
+            }
+        }
+        defined_in.sort_keys();
+        let export = |file: &str, name: &str| {
+            format!("export type {name} = {};", ts_index_raw(file, &["components", "schemas", name]))
+        };
+        let mut lines: Vec<String> = root.iter().map(|n| export(".", n)).collect();
+        let mut ambiguous = vec![];
+        for (name, files) in &defined_in {
+            match files.as_slice() {
+                [only] => lines.push(export(only, name)),
+                _ => ambiguous.push(format!("//   {name}: {}", files.join(", "))),
+            }
+        }
+        if !ambiguous.is_empty() {
+            lines.push("// No named export, defined in more than one file:".into());
+            lines.extend(ambiguous);
+        }
+        lines.push(String::new());
+        lines.join("\n")
+    }
+}
+
+/// The generated file already exports these names.
+const RESERVED: [&str; 6] = ["paths", "webhooks", "components", "$defs", "external", "operations"];
+
+fn is_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
 /// The TS lookup for a location: `components["schemas"]["X"]` in the root file,

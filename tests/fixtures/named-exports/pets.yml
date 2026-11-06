@@ -1,0 +1,9 @@
+components:
+  schemas:
+    Pet:
+      type: object
+      properties:
+        owner: { $ref: "./owners.yml#/components/schemas/Owner" }
+        tag: { $ref: "#/components/schemas/Tag" }
+    Tag: { type: string }
+    Shared: { type: string }

@@ -1,0 +1,8 @@
+openapi: 3.0.3
+info: { title: named exports, version: "1" }
+paths: {}
+components:
+  schemas:
+    Pet: { $ref: "./pets.yml#/components/schemas/Pet" }
+    Owner: { $ref: "./owners.yml#/components/schemas/Owner" }
+    "not-an-identifier": { type: string }

@@ -8,7 +8,14 @@ It is a native binary with no Node or TypeScript dependency, so it is unaffected
 ```sh
 openapi-ts-rs spec.yml -o spec.gen.d.ts   # warns about $refs that do not resolve
 openapi-ts-rs spec.yml --strict           # ...or fails on them
+openapi-ts-rs spec.yml --named-exports    # also exports every schema by name
 ```
+
+`--named-exports` appends `export type Pet = components["schemas"]["Pet"];` for every schema under
+`components.schemas`, in the root file and in every referenced file, so code can import `Pet`
+instead of spelling out the lookup. A name that more than one referenced file defines gets no
+export and is listed in a comment instead; the root file's schemas always win. Without the flag
+the output is unchanged.
 
 ## Install with mise
 
