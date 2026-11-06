@@ -15,11 +15,11 @@ openapi-ts-rs spec.yml --strict           # ...or fails on them
 ```toml
 # mise.toml
 [tools]
-"github:FredrikAugust/openapi-ts-rs" = "latest"
+"github:dash0hq/openapi-ts-rs" = "latest"
 ```
 
-Every push to `main` publishes a release (`v0.1.<run number>`) with binaries for Linux and macOS on
-x86_64 and arm64. While the repository is private, mise needs a `GITHUB_TOKEN` that can read it.
+Every push to `main` publishes a release (`v0.1.<run number>`) with binaries for Linux (glibc and
+musl) and macOS on x86_64 and arm64.
 
 ## Performance
 
