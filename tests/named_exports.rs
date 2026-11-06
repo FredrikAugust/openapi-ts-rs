@@ -23,6 +23,14 @@ fn exports_each_schema_by_name_and_skips_names_defined_twice() {
 }
 
 #[test]
+fn skips_names_that_would_shadow_a_referenced_type_or_are_reserved_words() {
+    let ts = generate(&["--named-exports"]);
+    assert!(ts.contains("Record<string, never>"), "the fixture must reference Record: {ts}");
+    assert!(!ts.contains("export type Record ="), "{ts}");
+    assert!(!ts.contains("export type import ="), "{ts}");
+}
+
+#[test]
 fn output_without_the_flag_has_no_named_exports() {
     let ts = generate(&[]);
     assert!(!ts.contains("export type Pet ="), "{ts}");

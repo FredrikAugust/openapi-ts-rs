@@ -6,3 +6,5 @@ components:
     Pet: { $ref: "./pets.yml#/components/schemas/Pet" }
     Owner: { $ref: "./owners.yml#/components/schemas/Owner" }
     "not-an-identifier": { type: string }
+    Record: { type: object }
+    import: { type: string }

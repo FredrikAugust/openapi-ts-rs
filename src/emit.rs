@@ -890,12 +890,13 @@ impl<'a> Gen<'a> {
                 .collect()
         };
         let root = schema_names(".");
+        let in_root: std::collections::HashSet<&str> = root.iter().map(String::as_str).collect();
         let mut defined_in: IndexMap<String, Vec<String>> = IndexMap::new();
         let mut ids: Vec<&String> = self.spec.files.keys().filter(|k| *k != ".").collect();
         ids.sort();
         for id in ids {
             for name in schema_names(id) {
-                if !root.contains(&name) {
+                if !in_root.contains(name.as_str()) {
                     defined_in.entry(name).or_default().push(id.clone());
                 }
             }
@@ -921,8 +922,78 @@ impl<'a> Gen<'a> {
     }
 }
 
-/// The generated file already exports these names.
-const RESERVED: [&str; 6] = ["paths", "webhooks", "components", "$defs", "external", "operations"];
+/// Names a type alias cannot take: the file's own exports, the types it references (an export
+/// would shadow them), reserved words, and built-in type names.
+const RESERVED: &[&str] = &[
+    "Record",
+    "Omit",
+    "Exclude",
+    "WithRequired",
+    "Without",
+    "XOR",
+    "OneOf",
+    "paths",
+    "webhooks",
+    "components",
+    "$defs",
+    "external",
+    "operations",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "import",
+    "in",
+    "instanceof",
+    "new",
+    "null",
+    "return",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "var",
+    "void",
+    "while",
+    "with",
+    "implements",
+    "interface",
+    "let",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "static",
+    "yield",
+    "any",
+    "unknown",
+    "never",
+    "number",
+    "bigint",
+    "boolean",
+    "string",
+    "symbol",
+    "object",
+    "undefined",
+];
 
 fn is_identifier(s: &str) -> bool {
     let mut chars = s.chars();
