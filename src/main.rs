@@ -43,7 +43,7 @@ fn run() -> Result<()> {
     if std::env::var_os("OPENAPI_TS_RS_TIMING").is_some() {
         eprintln!("load {t1:?}, emit {:?}", t.elapsed() - t1);
     }
-    let errors = g.errors.into_inner();
+    let errors = g.errors.take();
     if !errors.is_empty() {
         let msg = format!("{} unresolved $ref(s):\n  {}", errors.len(), errors.join("\n  "));
         if strict {
@@ -56,14 +56,34 @@ fn run() -> Result<()> {
             if let Some(dir) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
                 std::fs::create_dir_all(dir)?;
             }
-            std::fs::write(p, ts)?;
+            // Rewriting an unchanged file costs more than comparing it, and keeps its mtime for watchers.
+            if std::fs::read(&p).ok().as_deref() != Some(ts.as_bytes()) {
+                std::fs::write(p, ts)?;
+            }
         }
         None => print!("{ts}"),
     }
+    // Freeing every parsed document only delays the exit.
+    std::mem::forget(g);
+    std::mem::forget(spec);
     Ok(())
 }
 
+/// mimalloc commits memory in large regions that transparent huge pages back with 2 MiB pages,
+/// tripling peak RSS for no measurable speedup.
+#[cfg(target_os = "linux")]
+fn disable_transparent_huge_pages() {
+    const PR_SET_THP_DISABLE: i32 = 41;
+    unsafe extern "C" {
+        fn prctl(option: i32, ...) -> i32;
+    }
+    let (on, unused) = (1 as std::ffi::c_ulong, 0 as std::ffi::c_ulong);
+    unsafe { prctl(PR_SET_THP_DISABLE, on, unused, unused, unused) };
+}
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    disable_transparent_huge_pages();
     if let Err(e) = run() {
         eprintln!("error: {e:#}");
         std::process::exit(1);

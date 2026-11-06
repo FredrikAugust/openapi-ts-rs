@@ -63,28 +63,37 @@ fn comp<'v>(o: &'v Obj, k: &str) -> Option<Vec<&'v Value>> {
 
 impl<'a> Gen<'a> {
     pub fn new(spec: &'a Spec) -> Self {
+        let files: Vec<(&String, &crate::load::File)> = spec.files.iter().collect();
+        let found: Vec<_> = files
+            .par_iter()
+            .map(|(id, f)| {
+                let mut found = vec![];
+                walk(&f.doc, &mut vec![], &mut |o, path| {
+                    if o.get("discriminator").is_some_and(|d| truthy(Some(d))) {
+                        found.push((ts_index_raw(id, path), o));
+                    }
+                });
+                found
+            })
+            .collect();
         let mut discs = HashMap::new();
         let mut injected = vec![];
-        for (id, f) in &spec.files {
-            walk(&f.doc, &mut vec![], &mut |o, path| {
-                let Some(d) = o.get("discriminator").filter(|d| truthy(Some(d))) else {
-                    return;
-                };
-                let property = d.get("propertyName").map(js_string).unwrap_or_else(|| "undefined".into());
-                let mapping = d.get("mapping").and_then(obj).cloned();
-                let refs: Vec<String> = o
-                    .get("oneOf")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|c| c.get("$ref")?.as_str().map(String::from))
-                    .collect();
-                if spec.files.len() > 1 && !refs.is_empty() {
-                    injected.push((refs, format!("{}\u{0}{}", property, serde_json::to_string(&mapping).unwrap())));
-                }
-                // 6.7.0 keys these by the raw path, so a discriminator under `properties` is never found.
-                discs.insert(ts_index_raw(id, path), Disc { property, mapping });
-            });
+        for (index, o) in found.into_iter().flatten() {
+            let d = &o["discriminator"];
+            let property = d.get("propertyName").map(js_string).unwrap_or_else(|| "undefined".into());
+            let mapping = d.get("mapping").and_then(obj).cloned();
+            let refs: Vec<String> = o
+                .get("oneOf")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c.get("$ref")?.as_str().map(String::from))
+                .collect();
+            if spec.files.len() > 1 && !refs.is_empty() {
+                injected.push((refs, format!("{}\u{0}{}", property, serde_json::to_string(&mapping).unwrap())));
+            }
+            // 6.7.0 keys these by the raw path, so a discriminator under `properties` is never found.
+            discs.insert(index, Disc { property, mapping });
         }
         Gen::with(spec, ".", Arc::new(Discriminators { by_index: discs, injected }))
     }
@@ -100,6 +109,43 @@ impl<'a> Gen<'a> {
             used_one_of: Cell::new(false),
             used_with_required: Cell::new(false),
         }
+    }
+
+    /// Lines for each of `items`, in order, rendered in parallel chunks by forks of this `Gen`
+    /// whose state is merged back in order, so the result is the same as a serial pass.
+    fn par_lines<T: Sync>(&self, items: &[T], f: impl Fn(&Gen<'a>, &T) -> Vec<String> + Sync) -> Vec<String> {
+        const MIN_PARALLEL: usize = 64;
+        if items.len() < MIN_PARALLEL {
+            return items.iter().flat_map(|t| f(self, t)).collect();
+        }
+        let (spec, discs, file) = (self.spec, &self.discs, self.file.borrow().clone());
+        let chunk = (items.len() / (rayon::current_num_threads() * 4)).max(8);
+        let parts: Vec<(Vec<String>, Gen)> = items
+            .par_chunks(chunk)
+            .map(|c| {
+                let g = Gen::with(spec, &file, discs.clone());
+                (c.iter().flat_map(|t| f(&g, t)).collect(), g)
+            })
+            .collect();
+        let mut out = vec![];
+        for (lines, g) in parts {
+            out.extend(lines);
+            self.absorb(g);
+        }
+        out
+    }
+
+    /// Merges a fork's state. Forks of one file report an unresolved ref once each, as one `Gen` would.
+    fn absorb(&self, g: Gen) {
+        self.operations.borrow_mut().extend(g.operations.into_inner());
+        let mut errors = self.errors.borrow_mut();
+        for e in g.errors.into_inner() {
+            if !errors.contains(&e) {
+                errors.push(e);
+            }
+        }
+        self.used_one_of.set(self.used_one_of.get() || g.used_one_of.get());
+        self.used_with_required.set(self.used_with_required.get() || g.used_with_required.get());
     }
 
     fn ts_ref(&self, r: &str) -> String {
@@ -374,15 +420,14 @@ impl<'a> Gen<'a> {
         }
         let lv1 = lv + 1;
         let mut out = vec!["{".to_string()];
-        for (name, v) in map {
+        let entries: Vec<(&String, &Value)> = map.iter().collect();
+        out.extend(self.par_lines(&entries, |g, (name, v)| {
+            let mut out = vec![];
             let Some(o) = obj(v) else {
                 if v.is_array() {
-                    out.push(indent(
-                        &format!("{}: {};", key(name), self.schema(v, &format!("{path}{name}"), lv1)),
-                        lv1,
-                    ));
+                    out.push(indent(&format!("{}: {};", key(name), g.schema(v, &format!("{path}{name}"), lv1)), lv1));
                 }
-                continue;
+                return out;
             };
             if let Some(c) = schema_comment(v, lv1) {
                 out.push(indent(&c, lv1));
@@ -391,14 +436,15 @@ impl<'a> Gen<'a> {
             let p = format!("{path}{name}");
             let t = if !o.contains_key("type") && !o.contains_key("$ref") && METHODS.iter().any(|m| o.contains_key(*m))
             {
-                self.path_item(o, &p, lv1)
+                g.path_item(o, &p, lv1)
             } else if o.contains_key("in") {
-                self.parameter(v, &p, lv1)
+                g.parameter(v, &p, lv1)
             } else {
-                self.schema(v, &p, lv1)
+                g.schema(v, &p, lv1)
             };
             out.push(indent(&format!("{ro}{}: {t};", key(name)), lv1));
-        }
+            out
+        }));
         out.push(indent("}", lv));
         out.join("\n")
     }
@@ -605,19 +651,22 @@ impl<'a> Gen<'a> {
 
     fn paths(&self, paths: &Obj, prefix: &str, lv: usize) -> String {
         let mut out = vec!["{".to_string()];
-        for (url, item) in paths {
-            let Some(io) = obj(item) else { continue };
+        let entries: Vec<(&String, &Value)> = paths.iter().collect();
+        out.extend(self.par_lines(&entries, |g, (url, item)| {
+            let mut out = vec![];
+            let Some(io) = obj(item) else { return out };
             let t = match io.get("$ref").and_then(Value::as_str) {
                 Some(r) => {
                     if let Some(c) = schema_comment(item, lv + 1) {
                         out.push(indent(&c, lv + 1));
                     }
-                    self.ts_ref(r)
+                    g.ts_ref(r)
                 }
-                None => self.path_item(io, &format!("#/{prefix}/{url}"), lv + 1),
+                None => g.path_item(io, &format!("#/{prefix}/{url}"), lv + 1),
             };
             out.push(indent(&format!("{}: {t};", str_lit(url)), lv + 1));
-        }
+            out
+        }));
         out.push(indent("}", lv));
         out.join("\n")
     }
@@ -832,10 +881,10 @@ pub fn ts_index(file: &str, pointer: &[String]) -> String {
     ts_index_raw(file, &segs)
 }
 
-fn ts_index_raw(file: &str, segs: &[String]) -> String {
-    let idx = |s: &[String]| s.iter().map(|s| format!("[{}]", str_lit(s))).collect::<String>();
+fn ts_index_raw<S: AsRef<str>>(file: &str, segs: &[S]) -> String {
+    let idx = |s: &[S]| s.iter().map(|s| format!("[{}]", str_lit(s.as_ref()))).collect::<String>();
     match (file, segs.split_first()) {
-        (".", Some((head, rest))) => format!("{head}{}", idx(rest)),
+        (".", Some((head, rest))) => format!("{}{}", head.as_ref(), idx(rest)),
         (".", None) => "unknown".into(),
         (f, _) => format!("external[{}]{}", str_lit(f), idx(segs)),
     }

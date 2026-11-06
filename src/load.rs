@@ -32,7 +32,35 @@ pub struct File {
 /// Parsed files by path, or the error that reading or parsing them produced.
 pub type Obj = serde_json::Map<String, Value>;
 
-type Parsed = HashMap<PathBuf, Result<Value, String>>;
+type Parsed = HashMap<PathBuf, Result<Loaded, String>>;
+
+/// A parsed file and its first `$ref` to each other file, found while parsing in parallel.
+struct Loaded {
+    doc: Value,
+    refs: Vec<FileRef>,
+    /// The refs as found once `components.examples` is dropped, when the file has examples.
+    refs_without_examples: Option<Vec<FileRef>>,
+}
+
+/// A ref's location (`None` for an array index) and the ref.
+type FileRef = (Vec<Option<String>>, String);
+
+impl Loaded {
+    fn new(doc: Value) -> Loaded {
+        let refs = |skip_examples| {
+            let mut out = vec![];
+            collect_refs(&doc, &mut vec![], &mut Default::default(), &mut out, skip_examples);
+            out.into_iter()
+                .map(|(at, r)| {
+                    let at = at.iter().map(|s| if let Seg::K(k) = s { Some(k.to_string()) } else { None }).collect();
+                    (at, r.to_string())
+                })
+                .collect()
+        };
+        let has_examples = doc.get("components").and_then(|c| c.get("examples")).is_some();
+        Loaded { refs: refs(false), refs_without_examples: has_examples.then(|| refs(true)), doc }
+    }
+}
 
 pub struct Spec {
     pub root: PathBuf,
@@ -107,12 +135,12 @@ pub fn split_ref(r: &str) -> (&str, Vec<String>) {
 
 /// A location segment; array indices matter to the hint rules.
 #[derive(Clone)]
-enum Seg {
-    K(String),
+enum Seg<'a> {
+    K(&'a str),
     I,
 }
 
-fn seg(p: &[Seg], i: usize) -> &str {
+fn seg<'a>(p: &[Seg<'a>], i: usize) -> &'a str {
     match p.get(i) {
         Some(Seg::K(k)) => k,
         _ => "",
@@ -133,7 +161,7 @@ fn get_hint(p: &[Seg], start: Kind) -> Kind {
     fn media(p: &[Seg]) -> Kind {
         if seg(p, 0) == "schema" { schema(&p[1..]) } else { Kind::MediaType }
     }
-    fn tail(p: &[Seg], n: usize) -> &[Seg] {
+    fn tail<'p, 'a>(p: &'p [Seg<'a>], n: usize) -> &'p [Seg<'a>] {
         p.get(n..).unwrap_or(&[])
     }
     fn body(p: &[Seg]) -> Kind {
@@ -210,18 +238,21 @@ impl Spec {
         if self.files.contains_key(&id) {
             return Ok(());
         }
-        let mut doc = match self.parsed.remove(path) {
-            Some(Ok(doc)) => doc,
+        let loaded = match self.parsed.remove(path) {
+            Some(Ok(l)) => l,
             Some(Err(e)) => bail!(e),
             None => bail!("{} was not loaded", path.display()),
         };
-        if kind == Kind::Document
-            && let Some(Value::Object(c)) = doc.get_mut("components")
-        {
-            c.shift_remove("examples");
-        }
-        let mut refs = vec![];
-        collect_refs(&doc, &mut vec![], &mut Default::default(), &mut refs);
+        let mut doc = loaded.doc;
+        let refs = match loaded.refs_without_examples {
+            Some(refs) if kind == Kind::Document => {
+                if let Some(Value::Object(c)) = doc.get_mut("components") {
+                    c.shift_remove("examples");
+                }
+                refs
+            }
+            _ => loaded.refs,
+        };
         self.files.insert(id, File { doc: Value::Null, kind, path: path.to_path_buf() });
         for (at, r) in &refs {
             let (file, pointer) = split_ref(r);
@@ -235,9 +266,9 @@ impl Spec {
             let child = match pointer.first().map(String::as_str) {
                 Some("paths" | "components") => Kind::Document,
                 _ => {
-                    let mut p = at.clone();
-                    p.push(Seg::K(file.to_string()));
-                    p.extend(pointer.iter().map(|s| Seg::K(s.clone())));
+                    let mut p: Vec<Seg> = at.iter().map(|s| s.as_deref().map_or(Seg::I, Seg::K)).collect();
+                    p.push(Seg::K(file));
+                    p.extend(pointer.iter().map(|s| Seg::K(s)));
                     get_hint(&p, kind)
                 }
             };
@@ -281,50 +312,60 @@ fn ref_target(from: &Path, r: &str) -> Option<PathBuf> {
     Some(normalize(&from.parent().unwrap().join(percent_decode(file))))
 }
 
-fn read_and_parse(path: &Path) -> Result<Value, String> {
-    let src = std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-    let mut doc = crate::yaml::parse(&src).map_err(|e| format!("parsing {}: {e:#}", path.display()))?;
+fn read(path: &Path) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))
+}
+
+fn parse(path: &Path, src: &str) -> Result<Value, String> {
+    let mut doc = crate::yaml::parse(src).map_err(|e| format!("parsing {}: {e:#}", path.display()))?;
     strip_x_refs(&mut doc);
     Ok(doc)
 }
 
-/// Distinct file parts of the external `$ref`s in `v`.
-fn ref_files<'a>(v: &'a Value, out: &mut indexmap::IndexSet<&'a str>) {
-    match v {
-        Value::Object(o) => {
-            if let Some(r) = o.get("$ref").and_then(Value::as_str) {
-                let file = r.split_once('#').map_or(r, |(f, _)| f);
-                if !file.is_empty() {
-                    out.insert(file);
-                }
-            }
-            o.values().for_each(|x| ref_files(x, out));
+/// The file parts of what look like `$ref` values in YAML or JSON text. A guess, used only to
+/// start parsing referenced files before their parent is parsed; the parsed refs are authoritative.
+fn guess_ref_files(src: &str) -> indexmap::IndexSet<&str> {
+    let mut out = indexmap::IndexSet::new();
+    for (i, _) in src.match_indices("$ref") {
+        let rest = src[i + 4..].trim_start_matches(['"', '\'']).trim_start_matches([' ', '\t']);
+        let Some(rest) = rest.strip_prefix(':') else { continue };
+        let rest = rest.trim_start_matches([' ', '\t']);
+        let (rest, end): (&str, &[char]) = match rest.as_bytes().first() {
+            Some(b'"') => (&rest[1..], &['"', '#', '\n']),
+            Some(b'\'') => (&rest[1..], &['\'', '#', '\n']),
+            _ => (rest, &['#', '\n', '\r', ' ', '\t', ',', '}', ']']),
+        };
+        let file = &rest[..rest.find(end).unwrap_or(rest.len())];
+        if !file.is_empty() {
+            out.insert(file);
         }
-        Value::Array(a) => a.iter().for_each(|x| ref_files(x, out)),
-        _ => {}
     }
+    out
 }
 
 /// Reads and parses `root` and every file it references, transitively, in parallel.
 fn parse_all(root: &Path) -> Parsed {
-    fn visit<'s>(scope: &rayon::Scope<'s>, path: PathBuf, out: &'s Mutex<Parsed>) {
-        let doc = read_and_parse(&path);
-        let mut targets = vec![];
-        if let Ok(d) = &doc {
-            let mut files = indexmap::IndexSet::new();
-            ref_files(d, &mut files);
-            targets.extend(files.into_iter().filter_map(|f| ref_target(&path, f)));
-        }
+    fn spawn<'s>(scope: &rayon::Scope<'s>, from: &Path, files: indexmap::IndexSet<&str>, out: &'s Mutex<Parsed>) {
+        let targets: Vec<PathBuf> = files.into_iter().filter_map(|f| ref_target(from, f)).collect();
         let mut seen = out.lock().unwrap();
-        seen.insert(path.clone(), doc);
         for t in targets {
-            {
-                if !seen.contains_key(&t) {
-                    seen.insert(t.clone(), Err(String::new()));
-                    scope.spawn(move |s| visit(s, t, out));
-                }
+            if !seen.contains_key(&t) {
+                seen.insert(t.clone(), Err(String::new()));
+                scope.spawn(move |s| visit(s, t, out));
             }
         }
+    }
+    fn visit<'s>(scope: &rayon::Scope<'s>, path: PathBuf, out: &'s Mutex<Parsed>) {
+        let doc = read(&path).and_then(|src| {
+            spawn(scope, &path, guess_ref_files(&src), out);
+            parse(&path, &src)
+        });
+        let loaded = doc.map(Loaded::new);
+        if let Ok(l) = &loaded {
+            let files = l.refs.iter().map(|(_, r)| r.split_once('#').map_or(r.as_str(), |(f, _)| f)).collect();
+            spawn(scope, &path, files, out);
+        }
+        out.lock().unwrap().insert(path, loaded);
     }
     let out = Mutex::new(HashMap::new());
     out.lock().unwrap().insert(root.to_path_buf(), Err(String::new()));
@@ -360,28 +401,32 @@ fn strip_x_refs(v: &mut Value) {
 /// the file's kind, and later refs to the same file find it already loaded.
 fn collect_refs<'a>(
     v: &'a Value,
-    path: &mut Vec<Seg>,
+    path: &mut Vec<Seg<'a>>,
     seen: &mut std::collections::HashSet<&'a str>,
-    out: &mut Vec<(Vec<Seg>, String)>,
+    out: &mut Vec<(Vec<Seg<'a>>, &'a str)>,
+    skip_examples: bool,
 ) {
     match v {
         Value::Object(o) => {
             if let Some(r) = o.get("$ref").and_then(Value::as_str) {
                 let file = r.split_once('#').map_or(r, |(f, _)| f);
                 if !file.is_empty() && seen.insert(file) {
-                    out.push((path.clone(), r.to_string()));
+                    out.push((path.clone(), r));
                 }
             }
             for (k, x) in o {
-                path.push(Seg::K(k.clone()));
-                collect_refs(x, path, seen, out);
+                if skip_examples && k == "examples" && matches!(path.as_slice(), [Seg::K("components")]) {
+                    continue;
+                }
+                path.push(Seg::K(k));
+                collect_refs(x, path, seen, out, skip_examples);
                 path.pop();
             }
         }
         Value::Array(a) => {
             for x in a {
                 path.push(Seg::I);
-                collect_refs(x, path, seen, out);
+                collect_refs(x, path, seen, out, skip_examples);
                 path.pop();
             }
         }
@@ -390,19 +435,23 @@ fn collect_refs<'a>(
 }
 
 /// Visits every object in `v` with its path.
-pub fn walk<'a>(v: &'a Value, path: &mut Vec<String>, f: &mut dyn FnMut(&'a Obj, &[String])) {
+pub fn walk<'a>(
+    v: &'a Value,
+    path: &mut Vec<std::borrow::Cow<'a, str>>,
+    f: &mut dyn FnMut(&'a Obj, &[std::borrow::Cow<'a, str>]),
+) {
     match v {
         Value::Object(o) => {
             f(o, path);
             for (k, x) in o {
-                path.push(k.clone());
+                path.push(k.as_str().into());
                 walk(x, path, f);
                 path.pop();
             }
         }
         Value::Array(a) => {
             for (i, x) in a.iter().enumerate() {
-                path.push(i.to_string());
+                path.push(i.to_string().into());
                 walk(x, path, f);
                 path.pop();
             }
